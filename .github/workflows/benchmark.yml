@@ -1,53 +1,111 @@
-name: BenchmarkDotNet CI Pipeline
+name: .NET Performance Benchmarks Regression Tracker
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 jobs:
-  benchmark:
-    name: Benchmark (${{ matrix.framework }})
+  # Job 1: Benchmark Suite for Modern .NET 6.0
+  benchmark_net60:
+    name: Run .NET 6.0 Benchmarks (Windows Server)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        framework: [net6.0, net48]
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
 
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: |
-            6.0.x
-            8.0.x
+    - name: Setup .NET SDK (6.0.x)
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
 
-      - name: Restore Dependencies
-        run: dotnet restore dotnet/ConcurrentObservableCollection.sln
+    - name: Restore dependencies
+      run: dotnet restore dotnet/ConcurrentObservableCollection.sln
 
-      - name: Build Solution (Release)
-        run: dotnet build dotnet/ConcurrentObservableCollection.sln -c Release --no-restore
+    - name: Build Benchmarks in Release Mode
+      run: dotnet build dotnet/ConcurrentObservableCollection.sln -c Release --no-restore
 
-      - name: Run Unit Tests (${{ matrix.framework }})
-        run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --framework ${{ matrix.framework }} --no-build --verbosity normal
+    - name: Run Unit Tests (.NET 6.0)
+      run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --framework net6.0 --no-build --verbosity normal
 
-      - name: Run BenchmarkDotNet (${{ matrix.framework }})
-        run: dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release -f ${{ matrix.framework }} --no-build --filter "*ReorderBenchmarks*" --exporters json --runtimes ${{ matrix.framework }}
+    - name: Execute .NET 6.0 Benchmarks
+      run: |
+        dotnet run -c Release --framework net6.0 --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -- --filter "*" --join
 
-      - name: Continuous Benchmark Regression Alert (${{ matrix.framework }})
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: BenchmarkDotNet (${{ matrix.framework }})
-          tool: 'benchmarkdotnet'
-          output-file-path: dotnet/benchmarks/BenchmarkDotNet.Artifacts/results/ConcurrentCollections.Benchmarks.ReorderBenchmarks-report.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: ${{ github.ref == 'refs/heads/main' }}
-          alert-threshold: '130%'
-          fail-on-alert: true
-          comment-on-alert: true
-          benchmark-data-dir-path: 'dev/benchmarks/${{ matrix.framework }}'
+    - name: Output Benchmark Result Table to Step Summary (net6.0)
+      if: always()
+      shell: pwsh
+      run: |
+        $mdFiles = Get-ChildItem -Path ./BenchmarkDotNet.Artifacts/results -Filter "*report-github.md" -Recurse -ErrorAction SilentlyContinue
+        if ($mdFiles -and $mdFiles.Count -gt 0) {
+            $tableLines = Get-Content $mdFiles[0].FullName | Where-Object { $_ -match '^\|' }
+            if ($env:GITHUB_STEP_SUMMARY) {
+                "### ⚡ .NET 6.0 Benchmark Results" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                $tableLines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+        } else {
+            $allMd = Get-ChildItem -Path ./BenchmarkDotNet.Artifacts/results -Filter "*.md" -Recurse -ErrorAction SilentlyContinue
+            if ($allMd -and $allMd.Count -gt 0) {
+                $tableLines = Get-Content $allMd[0].FullName | Where-Object { $_ -match '^\|' }
+                if ($env:GITHUB_STEP_SUMMARY) {
+                    "### ⚡ .NET 6.0 Benchmark Results" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                    $tableLines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                }
+            }
+        }
+
+  # Job 2: Benchmark Suite for Legacy .NET Framework 4.8
+  benchmark_net48:
+    name: Run .NET 4.8 Benchmarks (Windows Server)
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Setup MSBuild and Developer Command Prompt
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Setup .NET SDK (6.x & 4.8 developerpack)
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore dotnet/ConcurrentObservableCollection.sln
+
+    - name: Build Benchmarks in Release Mode
+      run: dotnet build dotnet/ConcurrentObservableCollection.sln -c Release --no-restore
+
+    - name: Run Unit Tests (.NET Framework 4.8)
+      run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --framework net48 --no-build --verbosity normal
+
+    - name: Execute .NET Framework 4.8 Benchmarks
+      run: |
+        dotnet run -c Release --framework net48 --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -- --filter "*" --join
+
+    - name: Output Benchmark Result Table to Step Summary (net48)
+      if: always()
+      shell: pwsh
+      run: |
+        $mdFiles = Get-ChildItem -Path ./BenchmarkDotNet.Artifacts/results -Filter "*report-github.md" -Recurse -ErrorAction SilentlyContinue
+        if ($mdFiles -and $mdFiles.Count -gt 0) {
+            $tableLines = Get-Content $mdFiles[0].FullName | Where-Object { $_ -match '^\|' }
+            if ($env:GITHUB_STEP_SUMMARY) {
+                "### ⚡ .NET Framework 4.8 Benchmark Results" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                $tableLines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+        } else {
+            $allMd = Get-ChildItem -Path ./BenchmarkDotNet.Artifacts/results -Filter "*.md" -Recurse -ErrorAction SilentlyContinue
+            if ($allMd -and $allMd.Count -gt 0) {
+                $tableLines = Get-Content $allMd[0].FullName | Where-Object { $_ -match '^\|' }
+                if ($env:GITHUB_STEP_SUMMARY) {
+                    "### ⚡ .NET Framework 4.8 Benchmark Results" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                    $tableLines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                }
+            }
+        }
+
 

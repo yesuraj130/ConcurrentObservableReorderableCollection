@@ -95,15 +95,16 @@ export const WorkflowSimulator: React.FC = () => {
     },
     {
       id: 'step-7',
-      name: 'Continuous Benchmark Action (Regression Check)',
-      command: 'uses: benchmark-action/github-action-benchmark@v1',
+      name: 'Output Benchmark Result Table to Step Summary',
+      command: 'powershell: Extract markdown tables to $GITHUB_STEP_SUMMARY',
       status: 'idle',
       logs: [
-        'Comparing current metrics against previous baseline...',
-        'Baseline: Add (18.60 us) -> Current: 18.42 us (-0.97% faster)',
-        'Baseline: MoveBefore (42.80 ns) -> Current: 42.15 ns (-1.52% faster)',
-        'No performance regression detected (Alert threshold: 130%)',
-        'Pushed updated performance dashboard to gh-pages branch',
+        'Reading BenchmarkDotNet.Artifacts/results/*report-github.md...',
+        'Generated GitHub Step Summary table for .NET 6.0 and .NET Framework 4.8',
+        '| Method | Mean | Gen0 | Allocated |',
+        '| MoveBefore_HeadAndTail | 42.15 ns | - | - |',
+        '| MoveAfter_MidToHead | 40.82 ns | - | - |',
+        'Appended benchmark markdown tables directly to GitHub Actions Summary.',
       ],
     },
   ]);

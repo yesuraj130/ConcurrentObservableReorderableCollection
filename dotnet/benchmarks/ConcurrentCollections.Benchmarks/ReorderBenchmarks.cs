@@ -6,8 +6,6 @@ using System.Threading.Tasks;
 namespace ConcurrentCollections.Benchmarks
 {
     [MemoryDiagnoser]
-    [SimpleJob(RuntimeMoniker.Net60, baseline: true)]
-    [SimpleJob(RuntimeMoniker.Net48)]
     public class ReorderBenchmarks
     {
         private ConcurrentObservableReorderableCollection<int> _collection = null!;
