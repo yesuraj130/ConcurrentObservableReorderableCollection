@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <TargetFrameworks>net6.0;net48</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
@@ -17,6 +18,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ConcurrentCollections\ConcurrentCollections.csproj" />
+  </ItemGroup>
+
+  <!-- net48 Reference assemblies for INotifyCollectionChanged if needed -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Core" />
   </ItemGroup>
 
 </Project>

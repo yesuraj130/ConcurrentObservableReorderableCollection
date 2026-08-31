@@ -948,6 +948,44 @@ jobs:
 `,
   },
   {
+    id: 'tests-csproj',
+    name: 'ConcurrentCollections.Tests.csproj',
+    path: 'tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj',
+    language: 'xml',
+    category: 'tests',
+    description: 'xUnit test project configuration multi-targeting net6.0 and net48 with LangVersion latest.',
+    content: `<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net48</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
+    <PackageReference Include="xunit" Version="2.7.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.7">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\\..\\src\\ConcurrentCollections\\ConcurrentCollections.csproj" />
+  </ItemGroup>
+
+  <!-- net48 Reference assemblies for INotifyCollectionChanged if needed -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+
+</Project>
+`,
+  },
+  {
     id: 'ci-workflow',
     name: 'build-and-test.yml',
     path: '.github/workflows/build-and-test.yml',
