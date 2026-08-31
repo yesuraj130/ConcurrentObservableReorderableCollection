@@ -40,13 +40,15 @@ namespace System.Collections.Concurrent
         IEnumerable<T>
         where T : notnull
     {
-        #region Internal Node Definition & Object Pool
+        #region Internal Intrusive Node Definition
 
         internal sealed class Node
         {
             public T Value = default!;
+            public int HashCode;
             public Node? Previous;
             public Node? Next;
+            public Node? BucketNext;
             public Node? PoolNext;
         }
 
@@ -55,8 +57,11 @@ namespace System.Collections.Concurrent
         #region Fields
 
         private readonly object _syncRoot = new object();
-        private readonly Dictionary<T, Node> _nodeMap;
         private readonly IEqualityComparer<T> _comparer;
+
+        // High-performance intrusive power-of-2 hash table (eliminates Dictionary<T, Node> overhead)
+        private Node?[] _buckets;
+        private int _mask; // _buckets.Length - 1 (allows fast bitwise AND instead of integer division)
 
         private Node? _head;
         private Node? _tail;
@@ -66,6 +71,7 @@ namespace System.Collections.Concurrent
         private Node? _poolHead;
         private int _poolCount;
         private const int MaxPoolCapacity = 65536;
+        private const int DefaultCapacity = 16;
 
         // Cached static event args to eliminate PropertyChangedEventArgs allocations
         private static readonly PropertyChangedEventArgs s_countChangedEventArgs = new PropertyChangedEventArgs(nameof(Count));
@@ -93,12 +99,12 @@ namespace System.Collections.Concurrent
         /// Initializes a new instance of the <see cref="ConcurrentObservableReorderableCollection{T}"/> class.
         /// </summary>
         public ConcurrentObservableReorderableCollection()
-            : this(0, null)
+            : this(DefaultCapacity, null)
         {
         }
 
         /// <summary>
-        /// Initializes a new instance with a specified initial capacity to eliminate dictionary rehashing.
+        /// Initializes a new instance with a specified initial capacity to eliminate hash table rehashing.
         /// </summary>
         public ConcurrentObservableReorderableCollection(int initialCapacity)
             : this(initialCapacity, null)
@@ -109,7 +115,7 @@ namespace System.Collections.Concurrent
         /// Initializes a new instance with a custom equality comparer.
         /// </summary>
         public ConcurrentObservableReorderableCollection(IEqualityComparer<T>? comparer)
-            : this(0, comparer)
+            : this(DefaultCapacity, comparer)
         {
         }
 
@@ -120,14 +126,17 @@ namespace System.Collections.Concurrent
         {
             if (initialCapacity < 0) throw new ArgumentOutOfRangeException(nameof(initialCapacity), "Capacity cannot be negative.");
             _comparer = comparer ?? EqualityComparer<T>.Default;
-            _nodeMap = new Dictionary<T, Node>(initialCapacity, _comparer);
+
+            int capacity = CalculatePowerOfTwo(Math.Max(DefaultCapacity, initialCapacity));
+            _buckets = new Node?[capacity];
+            _mask = capacity - 1;
         }
 
         /// <summary>
         /// Initializes a new instance populated with initial elements.
         /// </summary>
         public ConcurrentObservableReorderableCollection(IEnumerable<T> collection)
-            : this(0, null)
+            : this(DefaultCapacity, null)
         {
             if (collection == null) throw new ArgumentNullException(nameof(collection));
             foreach (var item in collection)
@@ -174,8 +183,8 @@ namespace System.Collections.Concurrent
 
         /// <summary>
         /// Adds an item to the tail of the collection in O(1) time.
-        /// If the item already exists, it is relocated to the tail.
-        /// Recycles pooled nodes for zero GC allocations in streaming loops.
+        /// If the item already exists in the collection, it is relocated to the tail.
+        /// Recycles pooled nodes to achieve zero steady-state GC allocations.
         /// </summary>
         public void Add(T item)
         {
@@ -183,50 +192,71 @@ namespace System.Collections.Concurrent
 
             NotifyCollectionChangedEventArgs? eventArgs = null;
             bool hasSubscribers;
+            int hashCode = _comparer.GetHashCode(item);
 
             lock (_syncRoot)
             {
                 hasSubscribers = CollectionChanged != null;
 
-                if (_nodeMap.TryGetValue(item, out var existingNode))
-                {
-                    // Item already exists - relocate to tail if not already tail
-                    if (existingNode != _tail)
-                    {
-                        int oldIndex = hasSubscribers ? GetNodeIndex_Locked(existingNode) : -1;
-                        UnlinkNode_Locked(existingNode);
-                        LinkLast_Locked(existingNode);
-                        int newIndex = _count - 1;
+                int bucket = (int)((uint)hashCode & (uint)_mask);
+                var existingNode = _buckets[bucket];
 
-                        if (hasSubscribers)
+                // Fast collision chain walk
+                while (existingNode != null)
+                {
+                    if (existingNode.HashCode == hashCode && _comparer.Equals(existingNode.Value, item))
+                    {
+                        // Item already exists; relocate to tail if not already tail
+                        if (existingNode != _tail)
                         {
-                            eventArgs = new NotifyCollectionChangedEventArgs(
-                                NotifyCollectionChangedAction.Move,
-                                item,
-                                newIndex,
-                                oldIndex);
-                        }
-                    }
-                }
-                else
-                {
-                    // New item insertion from free-list node pool
-                    var newNode = AcquireNode_Locked(item);
-                    LinkLast_Locked(newNode);
-                    _nodeMap[item] = newNode;
-                    _count++;
+                            int oldIndex = hasSubscribers ? GetNodeIndex_Locked(existingNode) : -1;
+                            UnlinkNode_Locked(existingNode);
+                            LinkLast_Locked(existingNode);
+                            int newIndex = _count - 1;
 
-                    if (hasSubscribers)
-                    {
-                        eventArgs = new NotifyCollectionChangedEventArgs(
-                            NotifyCollectionChangedAction.Add,
-                            item,
-                            _count - 1);
+                            if (hasSubscribers)
+                            {
+                                eventArgs = new NotifyCollectionChangedEventArgs(
+                                    NotifyCollectionChangedAction.Move,
+                                    item,
+                                    newIndex,
+                                    oldIndex);
+                            }
+                        }
+                        goto DispatchEvents;
                     }
+                    existingNode = existingNode.BucketNext;
+                }
+
+                // Check if hash table resize is needed
+                if (_count >= _buckets.Length)
+                {
+                    Resize_Locked();
+                    bucket = (int)((uint)hashCode & (uint)_mask);
+                }
+
+                // New item insertion from free-list node pool
+                var newNode = AcquireNode_Locked(item, hashCode);
+                
+                // Intrusive bucket chain insertion (at head of bucket)
+                newNode.BucketNext = _buckets[bucket];
+                _buckets[bucket] = newNode;
+
+                // Doubly-linked list tail insertion
+                LinkLast_Locked(newNode);
+                _count++;
+
+                if (hasSubscribers)
+                {
+                    eventArgs = new NotifyCollectionChangedEventArgs(
+                        NotifyCollectionChangedAction.Add,
+                        item,
+                        _count - 1);
                 }
             }
 
-            // Dispatch events OUTSIDE lock to prevent deadlocks with UI / Dispatcher threads
+        DispatchEvents:
+            // Fire events OUTSIDE the lock to prevent dispatcher / UI deadlocks
             if (eventArgs != null)
             {
                 OnCollectionChanged(eventArgs);
@@ -239,8 +269,8 @@ namespace System.Collections.Concurrent
         }
 
         /// <summary>
-        /// Attempts to remove and return the item at the head of the collection in O(1) time (FIFO queue order).
-        /// Recycles the node back to the pool for zero GC allocations.
+        /// Dequeues the item at the head of the collection in FIFO order in O(1) time.
+        /// Returns the node to the free-list pool with zero GC allocations.
         /// </summary>
 #if NET6_0_OR_GREATER
         public bool TryTake([MaybeNullWhen(false)] out T item)
@@ -262,9 +292,36 @@ namespace System.Collections.Concurrent
                 var headNode = _head;
                 item = headNode.Value;
 
+                // Intrusively remove from hash table bucket
+                int bucket = (int)((uint)headNode.HashCode & (uint)_mask);
+                var cur = _buckets[bucket];
+                Node? prevBucketNode = null;
+
+                while (cur != null)
+                {
+                    if (ReferenceEquals(cur, headNode))
+                    {
+                        if (prevBucketNode != null)
+                        {
+                            prevBucketNode.BucketNext = cur.BucketNext;
+                        }
+                        else
+                        {
+                            _buckets[bucket] = cur.BucketNext;
+                        }
+                        break;
+                    }
+                    prevBucketNode = cur;
+                    cur = cur.BucketNext;
+                }
+
+                // Unlink from doubly-linked list
                 UnlinkNode_Locked(headNode);
                 _count--;
-                ReleaseNode_Locked(item, headNode);
+
+                // Recycle node to pool
+                headNode.BucketNext = null;
+                ReleaseNode_Locked(headNode);
 
                 hasSubscribers = CollectionChanged != null;
                 if (hasSubscribers)
@@ -289,7 +346,7 @@ namespace System.Collections.Concurrent
         }
 
         /// <summary>
-        /// Reorders the collection such that <paramref name="source"/> is positioned immediately BEFORE <paramref name="target"/> in O(1) time.
+        /// Moves the source element immediately BEFORE the target element in O(1) time.
         /// </summary>
         public bool MoveBefore(T source, T target)
         {
@@ -300,11 +357,11 @@ namespace System.Collections.Concurrent
 
             lock (_syncRoot)
             {
-                if (!_nodeMap.TryGetValue(source, out var sourceNode) ||
-                    !_nodeMap.TryGetValue(target, out var targetNode))
-                {
-                    return false;
-                }
+                var sourceNode = FindNode_Locked(source);
+                if (sourceNode == null) return false;
+
+                var targetNode = FindNode_Locked(target);
+                if (targetNode == null) return false;
 
                 if (sourceNode.Next == targetNode)
                     return false; // Already immediately before target
@@ -334,7 +391,7 @@ namespace System.Collections.Concurrent
         }
 
         /// <summary>
-        /// Reorders the collection such that <paramref name="source"/> is positioned immediately AFTER <paramref name="target"/> in O(1) time.
+        /// Moves the source element immediately AFTER the target element in O(1) time.
         /// </summary>
         public bool MoveAfter(T source, T target)
         {
@@ -345,11 +402,11 @@ namespace System.Collections.Concurrent
 
             lock (_syncRoot)
             {
-                if (!_nodeMap.TryGetValue(source, out var sourceNode) ||
-                    !_nodeMap.TryGetValue(target, out var targetNode))
-                {
-                    return false;
-                }
+                var sourceNode = FindNode_Locked(source);
+                if (sourceNode == null) return false;
+
+                var targetNode = FindNode_Locked(target);
+                if (targetNode == null) return false;
 
                 if (sourceNode.Previous == targetNode)
                     return false; // Already immediately after target
@@ -379,7 +436,7 @@ namespace System.Collections.Concurrent
         }
 
         /// <summary>
-        /// Attempts to peek at the item at the head of the collection without removing it.
+        /// Attempts to return the object at the beginning of the collection without removing it.
         /// </summary>
 #if NET6_0_OR_GREATER
         public bool TryPeek([MaybeNullWhen(false)] out T item)
@@ -403,17 +460,19 @@ namespace System.Collections.Concurrent
         /// <summary>
         /// Determines whether the collection contains the specified item in O(1) time.
         /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool Contains(T item)
         {
             if (item == null) return false;
+
             lock (_syncRoot)
             {
-                return _nodeMap.ContainsKey(item);
+                return FindNode_Locked(item) != null;
             }
         }
 
         /// <summary>
-        /// Removes all elements from the collection and recycles nodes into the free-list pool.
+        /// Clears all elements from the collection and recycles nodes into the free-list pool.
         /// </summary>
         public void Clear()
         {
@@ -424,6 +483,7 @@ namespace System.Collections.Concurrent
                 if (_count == 0)
                     return;
 
+                // Recycle all nodes to pool
                 var current = _head;
                 while (current != null && _poolCount < MaxPoolCapacity)
                 {
@@ -431,16 +491,17 @@ namespace System.Collections.Concurrent
                     current.Value = default!;
                     current.Previous = null;
                     current.Next = null;
+                    current.BucketNext = null;
                     current.PoolNext = _poolHead;
                     _poolHead = current;
                     _poolCount++;
                     current = next;
                 }
 
+                Array.Clear(_buckets, 0, _buckets.Length);
                 _head = null;
                 _tail = null;
                 _count = 0;
-                _nodeMap.Clear();
 
                 if (CollectionChanged != null)
                 {
@@ -506,10 +567,26 @@ namespace System.Collections.Concurrent
 
         #endregion
 
-        #region Internal Pointer Helpers (Must be called inside lock (_syncRoot))
+        #region Internal Hash & Pointer Helpers (Must be called inside lock (_syncRoot))
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private Node AcquireNode_Locked(T item)
+        private Node? FindNode_Locked(T item)
+        {
+            int hashCode = _comparer.GetHashCode(item);
+            int bucket = (int)((uint)hashCode & (uint)_mask);
+            var cur = _buckets[bucket];
+
+            while (cur != null)
+            {
+                if (cur.HashCode == hashCode && _comparer.Equals(cur.Value, item))
+                    return cur;
+                cur = cur.BucketNext;
+            }
+            return null;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Node AcquireNode_Locked(T item, int hashCode)
         {
             if (_poolHead != null)
             {
@@ -518,24 +595,45 @@ namespace System.Collections.Concurrent
                 node.PoolNext = null;
                 _poolCount--;
                 node.Value = item;
+                node.HashCode = hashCode;
                 return node;
             }
-            return new Node { Value = item };
+            return new Node { Value = item, HashCode = hashCode };
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void ReleaseNode_Locked(T item, Node node)
+        private void ReleaseNode_Locked(Node node)
         {
-            _nodeMap.Remove(item);
             if (_poolCount < MaxPoolCapacity)
             {
                 node.Value = default!;
                 node.Previous = null;
                 node.Next = null;
+                node.BucketNext = null;
                 node.PoolNext = _poolHead;
                 _poolHead = node;
                 _poolCount++;
             }
+        }
+
+        private void Resize_Locked()
+        {
+            int newCapacity = _buckets.Length * 2;
+            var newBuckets = new Node?[newCapacity];
+            int newMask = newCapacity - 1;
+
+            // Re-bucket all active nodes from doubly-linked list in O(N) with NO re-hashing
+            var current = _head;
+            while (current != null)
+            {
+                int bucket = (int)((uint)current.HashCode & (uint)newMask);
+                current.BucketNext = newBuckets[bucket];
+                newBuckets[bucket] = current;
+                current = current.Next;
+            }
+
+            _buckets = newBuckets;
+            _mask = newMask;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -543,8 +641,14 @@ namespace System.Collections.Concurrent
         {
             node.Previous = _tail;
             node.Next = null;
-            if (_tail != null) _tail.Next = node;
-            else _head = node;
+            if (_tail != null)
+            {
+                _tail.Next = node;
+            }
+            else
+            {
+                _head = node;
+            }
             _tail = node;
         }
 
@@ -553,8 +657,14 @@ namespace System.Collections.Concurrent
         {
             node.Next = target;
             node.Previous = target.Previous;
-            if (target.Previous != null) target.Previous.Next = node;
-            else _head = node;
+            if (target.Previous != null)
+            {
+                target.Previous.Next = node;
+            }
+            else
+            {
+                _head = node;
+            }
             target.Previous = node;
         }
 
@@ -563,19 +673,37 @@ namespace System.Collections.Concurrent
         {
             node.Previous = target;
             node.Next = target.Next;
-            if (target.Next != null) target.Next.Previous = node;
-            else _tail = node;
+            if (target.Next != null)
+            {
+                target.Next.Previous = node;
+            }
+            else
+            {
+                _tail = node;
+            }
             target.Next = node;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void UnlinkNode_Locked(Node node)
         {
-            if (node.Previous != null) node.Previous.Next = node.Next;
-            else _head = node.Next;
+            if (node.Previous != null)
+            {
+                node.Previous.Next = node.Next;
+            }
+            else
+            {
+                _head = node.Next;
+            }
 
-            if (node.Next != null) node.Next.Previous = node.Previous;
-            else _tail = node.Previous;
+            if (node.Next != null)
+            {
+                node.Next.Previous = node.Previous;
+            }
+            else
+            {
+                _tail = node.Previous;
+            }
 
             node.Previous = null;
             node.Next = null;
@@ -594,7 +722,15 @@ namespace System.Collections.Concurrent
             return -1;
         }
 
-        #endregion
+        private static int CalculatePowerOfTwo(int value)
+        {
+            int power = 16;
+            while (power < value && power > 0)
+            {
+                power <<= 1;
+            }
+            return power > 0 ? power : 1073741824;
+        }
 
         #region Event Invocation Helpers
 
