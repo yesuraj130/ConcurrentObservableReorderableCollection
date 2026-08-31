@@ -631,34 +631,39 @@ jobs:
   {
     id: 'benchmarks-cs',
     name: 'ReorderBenchmarks.cs',
-    path: 'benchmarks/ConcurrentObservableReorderableCollection.Benchmarks/ReorderBenchmarks.cs',
+    path: 'benchmarks/ConcurrentCollections.Benchmarks/ReorderBenchmarks.cs',
     language: 'csharp',
     category: 'benchmarks',
-    description: 'BenchmarkDotNet suite comparing Add, TryTake, MoveBefore, MoveAfter across net6.0 and net48.',
-    content: `namespace ConcurrentObservableReorderableCollection.Benchmarks
+    description: 'BenchmarkDotNet suite comparing ConcurrentObservableReorderableCollection vs ConcurrentQueue and ObservableCollection.',
+    content: `namespace ConcurrentCollections.Benchmarks
 {
     using System;
     using System.Collections.Concurrent;
     using System.Collections.Generic;
+    using System.Collections.ObjectModel;
     using System.Threading.Tasks;
     using BenchmarkDotNet.Attributes;
     using BenchmarkDotNet.Configs;
     using BenchmarkDotNet.Diagnosers;
-    using BenchmarkDotNet.Jobs;
+    using ConcurrentCollections;
 
     [MemoryDiagnoser]
-    [SimpleJob(RuntimeMoniker.Net60, baseline: true)]
-    [SimpleJob(RuntimeMoniker.Net48)]
     [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
     [CategoriesColumn]
     public class ReorderBenchmarks
     {
-        private ConcurrentObservableReorderableCollection<int> _collection = null!;
-        private ConcurrentQueue<int> _standardQueue = null!;
+        private ConcurrentObservableReorderableCollection<int> _reorderableCollection = null!;
+        private ConcurrentQueue<int> _concurrentQueue = null!;
+        private ObservableCollection<int> _observableCollection = null!;
+        private readonly object _observableLock = new object();
+
         private int[] _sampleItems = null!;
+        private int _headItem;
+        private int _midItem;
+        private int _tailItem;
 
         [Params(100, 1000, 10000)]
-        public int N;
+        public int N { get; set; }
 
         [GlobalSetup]
         public void GlobalSetup()
@@ -673,12 +678,29 @@ jobs:
         [IterationSetup]
         public void IterationSetup()
         {
-            _collection = new ConcurrentObservableReorderableCollection<int>(_sampleItems);
-            _standardQueue = new ConcurrentQueue<int>(_sampleItems);
+            _reorderableCollection = new ConcurrentObservableReorderableCollection<int>();
+            _concurrentQueue = new ConcurrentQueue<int>();
+            _observableCollection = new ObservableCollection<int>();
+
+            for (int i = 0; i < N; i++)
+            {
+                int val = _sampleItems[i];
+                _reorderableCollection.Add(val);
+                _concurrentQueue.Enqueue(val);
+                _observableCollection.Add(val);
+            }
+
+            _headItem = _sampleItems[0];
+            _midItem = _sampleItems[N / 2];
+            _tailItem = _sampleItems[N - 1];
         }
 
+        // ====================================================================
+        // 1. ADD / ENQUEUE BENCHMARKS
+        // ====================================================================
+
         [Benchmark(Baseline = true)]
-        [BenchmarkCategory("Add")]
+        [BenchmarkCategory("Add_Enqueue")]
         public void Add_ReorderableCollection()
         {
             var coll = new ConcurrentObservableReorderableCollection<int>();
@@ -689,74 +711,221 @@ jobs:
         }
 
         [Benchmark]
-        [BenchmarkCategory("Add")]
-        public void Add_ConcurrentQueue()
+        [BenchmarkCategory("Add_Enqueue")]
+        public void Enqueue_ConcurrentQueue()
         {
-            var q = new ConcurrentQueue<int>();
+            var queue = new ConcurrentQueue<int>();
             for (int i = 0; i < N; i++)
             {
-                q.Enqueue(_sampleItems[i]);
+                queue.Enqueue(_sampleItems[i]);
             }
         }
+
+        [Benchmark]
+        [BenchmarkCategory("Add_Enqueue")]
+        public void Add_ObservableCollection()
+        {
+            var obs = new ObservableCollection<int>();
+            lock (_observableLock)
+            {
+                for (int i = 0; i < N; i++)
+                {
+                    obs.Add(_sampleItems[i]);
+                }
+            }
+        }
+
+        // ====================================================================
+        // 2. TAKE / DEQUEUE / REMOVE BENCHMARKS
+        // ====================================================================
 
         [Benchmark(Baseline = true)]
-        [BenchmarkCategory("TryTake")]
+        [BenchmarkCategory("TryTake_Dequeue")]
         public void TryTake_ReorderableCollection()
         {
-            while (_collection.TryTake(out _))
+            while (_reorderableCollection.TryTake(out _))
             {
             }
         }
 
         [Benchmark]
-        [BenchmarkCategory("TryTake")]
-        public void TryTake_ConcurrentQueue()
+        [BenchmarkCategory("TryTake_Dequeue")]
+        public void TryDequeue_ConcurrentQueue()
         {
-            while (_standardQueue.TryDequeue(out _))
+            while (_concurrentQueue.TryDequeue(out _))
             {
             }
         }
 
         [Benchmark]
-        [BenchmarkCategory("Reorder")]
-        public void MoveBefore_HeadAndTail()
+        [BenchmarkCategory("TryTake_Dequeue")]
+        public void RemoveFirst_ObservableCollection()
         {
-            // Move tail item to before head
-            _collection.MoveBefore(_sampleItems[N - 1], _sampleItems[0]);
+            lock (_observableLock)
+            {
+                while (_observableCollection.Count > 0)
+                {
+                    _observableCollection.RemoveAt(0);
+                }
+            }
+        }
+
+        // ====================================================================
+        // 3. REORDER / MOVE IN-PLACE BENCHMARKS
+        // ====================================================================
+
+        [Benchmark(Baseline = true)]
+        [BenchmarkCategory("Reorder_Move")]
+        public bool MoveBefore_ReorderableCollection_O1()
+        {
+            // O(1) instantaneous pointer relink via internal hash map + LinkedList
+            return _reorderableCollection.MoveBefore(_midItem, _headItem);
         }
 
         [Benchmark]
-        [BenchmarkCategory("Reorder")]
-        public void MoveAfter_MidToHead()
+        [BenchmarkCategory("Reorder_Move")]
+        public bool MoveAfter_ReorderableCollection_O1()
         {
-            // Move middle item to after head
-            _collection.MoveAfter(_sampleItems[N / 2], _sampleItems[0]);
+            // O(1) instantaneous pointer relink via internal hash map + LinkedList
+            return _reorderableCollection.MoveAfter(_headItem, _tailItem);
         }
 
         [Benchmark]
+        [BenchmarkCategory("Reorder_Move")]
+        public void Move_ObservableCollection_ON()
+        {
+            // O(N) index-based array shift in ObservableCollection
+            lock (_observableLock)
+            {
+                _observableCollection.Move(N / 2, 0);
+            }
+        }
+
+        [Benchmark]
+        [BenchmarkCategory("Reorder_Move")]
+        public void Reorder_ConcurrentQueue_DrainRebuild_ON()
+        {
+            // ConcurrentQueue has no random reorder API; requires draining to list and re-enqueuing
+            var list = new List<int>(N);
+            while (_concurrentQueue.TryDequeue(out var item))
+            {
+                list.Add(item);
+            }
+
+            if (list.Count > 1)
+            {
+                int itemToMove = list[list.Count / 2];
+                list.RemoveAt(list.Count / 2);
+                list.Insert(0, itemToMove);
+            }
+
+            foreach (var item in list)
+            {
+                _concurrentQueue.Enqueue(item);
+            }
+        }
+
+        // ====================================================================
+        // 4. MULTI-THREADED CONCURRENT WORKLOAD
+        // ====================================================================
+
+        [Benchmark(Baseline = true)]
         [BenchmarkCategory("ConcurrentStress")]
-        public void Concurrent_MixedWorkload()
+        public void ConcurrentStress_ReorderableCollection()
         {
             Parallel.Invoke(
                 () =>
                 {
-                    for (int i = 0; i < 500; i++)
+                    for (int i = 0; i < 200; i++)
                     {
-                        _collection.Add(100_000 + i);
+                        _reorderableCollection.Add(100_000 + i);
                     }
                 },
                 () =>
                 {
-                    for (int i = 0; i < 500; i++)
+                    for (int i = 0; i < 200; i++)
                     {
-                        _collection.TryTake(out _);
+                        _reorderableCollection.TryTake(out _);
                     }
                 },
                 () =>
                 {
-                    for (int i = 0; i < 500; i++)
+                    for (int i = 0; i < 200; i++)
                     {
-                        _collection.MoveBefore(_sampleItems[i % N], _sampleItems[(i + 1) % N]);
+                        _reorderableCollection.MoveBefore(_sampleItems[i % N], _headItem);
+                    }
+                },
+                () =>
+                {
+                    for (int i = 0; i < 200; i++)
+                    {
+                        _reorderableCollection.MoveAfter(_headItem, _sampleItems[(i + 1) % N]);
+                    }
+                }
+            );
+        }
+
+        [Benchmark]
+        [BenchmarkCategory("ConcurrentStress")]
+        public void ConcurrentStress_ConcurrentQueue()
+        {
+            Parallel.Invoke(
+                () =>
+                {
+                    for (int i = 0; i < 200; i++)
+                    {
+                        _concurrentQueue.Enqueue(100_000 + i);
+                    }
+                },
+                () =>
+                {
+                    for (int i = 0; i < 200; i++)
+                    {
+                        _concurrentQueue.TryDequeue(out _);
+                    }
+                }
+            );
+        }
+
+        [Benchmark]
+        [BenchmarkCategory("ConcurrentStress")]
+        public void ConcurrentStress_ObservableCollection_Locked()
+        {
+            Parallel.Invoke(
+                () =>
+                {
+                    for (int i = 0; i < 200; i++)
+                    {
+                        lock (_observableLock)
+                        {
+                            _observableCollection.Add(100_000 + i);
+                        }
+                    }
+                },
+                () =>
+                {
+                    for (int i = 0; i < 200; i++)
+                    {
+                        lock (_observableLock)
+                        {
+                            if (_observableCollection.Count > 0)
+                            {
+                                _observableCollection.RemoveAt(0);
+                            }
+                        }
+                    }
+                },
+                () =>
+                {
+                    for (int i = 0; i < 200; i++)
+                    {
+                        lock (_observableLock)
+                        {
+                            if (_observableCollection.Count > 1)
+                            {
+                                _observableCollection.Move(_observableCollection.Count / 2, 0);
+                            }
+                        }
                     }
                 }
             );
