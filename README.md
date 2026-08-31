@@ -33,5 +33,5 @@ dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests
 
 ### 2. Run BenchmarkDotNet Suite
 ```bash
-dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release
+dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release -f net6.0
 ```

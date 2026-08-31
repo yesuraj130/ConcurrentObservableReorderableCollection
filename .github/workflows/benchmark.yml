@@ -8,7 +8,7 @@ on:
 
 jobs:
   benchmark:
-    name: Run Benchmark.NET (.NET 6.0 & .NET 4.8)
+    name: Run BenchmarkDotNet (.NET 6.0 & .NET 4.8 Matrix)
     runs-on: windows-latest
 
     steps:
@@ -23,11 +23,17 @@ jobs:
       - name: Restore Dependencies
         run: dotnet restore dotnet/ConcurrentObservableCollection.sln
 
-      - name: Run Unit Tests
-        run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --verbosity normal
+      - name: Run Unit Tests (.NET 6.0)
+        run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --framework net6.0 --verbosity normal
 
-      - name: Run BenchmarkDotNet Suite
-        run: dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release --filter "*ReorderBenchmarks*" --exporters json
+      - name: Run Unit Tests (.NET Framework 4.8)
+        run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --framework net48 --verbosity normal
+
+      - name: Run BenchmarkDotNet (.NET 6.0)
+        run: dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release -f net6.0 --filter "*ReorderBenchmarks*" --exporters json
+
+      - name: Run BenchmarkDotNet (.NET Framework 4.8)
+        run: dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release -f net48 --filter "*ReorderBenchmarks*" --exporters json
 
       - name: Continuous Benchmark Regression Alert
         uses: benchmark-action/github-action-benchmark@v1
