@@ -1,0 +1,6 @@
+{
+  "name": "ConcurrentObservableReorderableCollection",
+  "description": "Thread-safe reorderable observable collection library for .NET 6.0 and .NET 4.8 with INotifyCollectionChanged and BenchmarkDotNet GitHub Actions workflow.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

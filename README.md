@@ -1,11 +1,37 @@
-<div align="center">
+# ConcurrentObservableReorderableCollection<T> (.NET 6.0 & .NET Framework 4.8)
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+High-performance, thread-safe observable collection supporting:
+- $O(1)$ constant time `MoveBefore` and `MoveAfter` relinking.
+- Concurrent thread-safe `Add` and `TryTake` (FIFO queue semantics).
+- Deadlock-safe `INotifyCollectionChanged` and `INotifyPropertyChanged` event dispatching.
+- Multi-targeting `.NET 6.0` and `.NET Framework 4.8`.
+- Complete BenchmarkDotNet benchmark suite and automated GitHub Actions CI.
 
-  <h1>Built with AI Studio</h2>
+## Solution Layout
+```
+├── .github/workflows/benchmark.yml
+├── dotnet/
+│   ├── ConcurrentObservableCollection.sln
+│   ├── src/ConcurrentCollections/
+│   │   ├── ConcurrentObservableReorderableCollection.cs
+│   │   └── ConcurrentCollections.csproj
+│   ├── benchmarks/ConcurrentCollections.Benchmarks/
+│   │   ├── ReorderBenchmarks.cs
+│   │   ├── Program.cs
+│   │   └── ConcurrentCollections.Benchmarks.csproj
+│   └── tests/ConcurrentCollections.Tests/
+│       ├── ConcurrentObservableCollectionTests.cs
+│       └── ConcurrentCollections.Tests.csproj
+```
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## Running Tests & Benchmarks
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+### 1. Build and Run Unit Tests
+```bash
+dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj
+```
 
-</div>
+### 2. Run BenchmarkDotNet Suite
+```bash
+dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release
+```

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net48</TargetFrameworks>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ConcurrentCollections</RootNamespace>
+    <AssemblyName>ConcurrentCollections</AssemblyName>
+    <Version>1.0.0</Version>
+    <Authors>ConcurrentObservableCollection Team</Authors>
+    <Description>High-performance thread-safe observable collection with O(1) MoveBefore and MoveAfter relinking.</Description>
+    <PackageTags>concurrent;collections;observable;reorder;wpf;net6;net48;inotifycollectionchanged</PackageTags>
+  </PropertyGroup>
+
+  <!-- net48 Reference assemblies for INotifyCollectionChanged -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="WindowsBase" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+
+</Project>

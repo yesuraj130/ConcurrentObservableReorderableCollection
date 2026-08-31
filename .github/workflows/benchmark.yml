@@ -1,0 +1,41 @@
+name: BenchmarkDotNet CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  benchmark:
+    name: Run Benchmark.NET (.NET 6.0 & .NET 4.8)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore dotnet/ConcurrentObservableCollection.sln
+
+      - name: Run Unit Tests
+        run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --verbosity normal
+
+      - name: Run BenchmarkDotNet Suite
+        run: dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release --filter "*ReorderBenchmarks*" --exporters json
+
+      - name: Continuous Benchmark Regression Alert
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'benchmarkdotnet'
+          output-file-path: dotnet/benchmarks/BenchmarkDotNet.Artifacts/results/ConcurrentCollections.Benchmarks.ReorderBenchmarks-report.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '130%'
+          fail-on-alert: true
+          comment-on-alert: true
