@@ -1030,6 +1030,67 @@ jobs:
 `,
   },
   {
+    id: 'benchmark-workflow',
+    name: 'benchmark.yml',
+    path: '.github/workflows/benchmark.yml',
+    language: 'yaml',
+    category: 'workflows',
+    description: 'Automated Matrix BenchmarkDotNet workflow running .NET 6.0 and .NET 4.8 with regression alerting.',
+    content: `name: BenchmarkDotNet CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  benchmark:
+    name: Benchmark (\${{ matrix.framework }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [net6.0, net48]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            8.0.x
+
+      - name: Restore Dependencies
+        run: dotnet restore dotnet/ConcurrentObservableCollection.sln
+
+      - name: Build Solution (Release)
+        run: dotnet build dotnet/ConcurrentObservableCollection.sln -c Release --no-restore
+
+      - name: Run Unit Tests (\${{ matrix.framework }})
+        run: dotnet test dotnet/tests/ConcurrentCollections.Tests/ConcurrentCollections.Tests.csproj --configuration Release --framework \${{ matrix.framework }} --no-build --verbosity normal
+
+      - name: Run BenchmarkDotNet (\${{ matrix.framework }})
+        run: dotnet run --project dotnet/benchmarks/ConcurrentCollections.Benchmarks/ConcurrentCollections.Benchmarks.csproj -c Release -f \${{ matrix.framework }} --no-build --filter "*ReorderBenchmarks*" --exporters json --runtimes \${{ matrix.framework }}
+
+      - name: Continuous Benchmark Regression Alert (\${{ matrix.framework }})
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: BenchmarkDotNet (\${{ matrix.framework }})
+          tool: 'benchmarkdotnet'
+          output-file-path: dotnet/benchmarks/BenchmarkDotNet.Artifacts/results/ConcurrentCollections.Benchmarks.ReorderBenchmarks-report.json
+          github-token: \${{ secrets.GITHUB_TOKEN }}
+          auto-push: \${{ github.ref == 'refs/heads/main' }}
+          alert-threshold: '130%'
+          fail-on-alert: true
+          comment-on-alert: true
+          benchmark-data-dir-path: 'dev/benchmarks/\${{ matrix.framework }}'
+`,
+  },
+  {
     id: 'readme-md',
     name: 'README.md',
     path: 'README.md',
