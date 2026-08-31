@@ -67,8 +67,8 @@ namespace System.Collections.Concurrent
 
         #region Fields
 
-        // Ultra-low overhead SpinLock (eliminates CLR sync-block table overhead and drops lock latency to ~4ns)
-        private SpinLock _spinLock = new SpinLock(enableThreadOwnerTracking: false);
+        // Adaptive CLR Monitor sync object (prevents CPU core spin starvation and cacheline thrashing under contention)
+        private readonly object _syncRoot = new object();
         private readonly IEqualityComparer<T> _comparer;
         private readonly bool _isDefaultComparer;
 
@@ -164,45 +164,21 @@ namespace System.Collections.Concurrent
         #region Properties
 
         /// <summary>
-        /// Gets the number of elements contained in the collection in O(1) time.
+        /// Gets the number of elements contained in the collection in lock-free O(1) time.
         /// </summary>
         public int Count
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get
-            {
-                bool lockTaken = false;
-                try
-                {
-                    _spinLock.Enter(ref lockTaken);
-                    return _count;
-                }
-                finally
-                {
-                    if (lockTaken) _spinLock.Exit(false);
-                }
-            }
+            get => Volatile.Read(ref _count);
         }
 
         /// <summary>
-        /// Gets a value indicating whether the collection is empty.
+        /// Gets a value indicating whether the collection is empty in lock-free O(1) time.
         /// </summary>
         public bool IsEmpty
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get
-            {
-                bool lockTaken = false;
-                try
-                {
-                    _spinLock.Enter(ref lockTaken);
-                    return _count == 0;
-                }
-                finally
-                {
-                    if (lockTaken) _spinLock.Exit(false);
-                }
-            }
+            get => Volatile.Read(ref _count) == 0;
         }
 
         #endregion
@@ -222,10 +198,8 @@ namespace System.Collections.Concurrent
             bool hasSubscribers;
             int hashCode = GetHashCode_Inline(item);
 
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
                 hasSubscribers = CollectionChanged != null;
 
                 int bucket = (int)((uint)hashCode & (uint)_mask);
@@ -289,10 +263,6 @@ namespace System.Collections.Concurrent
                         _count - 1);
                 }
             }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
-            }
 
         UnlockAndDispatch:
             // Fire events strictly OUTSIDE the lock to prevent dispatcher / UI deadlocks
@@ -321,11 +291,8 @@ namespace System.Collections.Concurrent
             NotifyCollectionChangedEventArgs? eventArgs = null;
             bool hasSubscribers;
 
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
-
                 if (_head == null)
                 {
                     item = default!;
@@ -368,10 +335,6 @@ namespace System.Collections.Concurrent
                         0);
                 }
             }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
-            }
 
             if (eventArgs != null)
             {
@@ -395,11 +358,8 @@ namespace System.Collections.Concurrent
             NotifyCollectionChangedEventArgs? eventArgs = null;
             bool hasSubscribers;
 
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
-
                 var node = FindNode_Locked(item);
                 if (node == null) return false;
 
@@ -438,10 +398,6 @@ namespace System.Collections.Concurrent
                         oldIndex);
                 }
             }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
-            }
 
             if (eventArgs != null)
             {
@@ -465,11 +421,8 @@ namespace System.Collections.Concurrent
 
             NotifyCollectionChangedEventArgs? eventArgs = null;
 
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
-
                 var sourceNode = FindNode_Locked(source);
                 if (sourceNode == null) return false;
 
@@ -495,10 +448,6 @@ namespace System.Collections.Concurrent
                         oldIndex);
                 }
             }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
-            }
 
             if (eventArgs != null)
             {
@@ -517,11 +466,8 @@ namespace System.Collections.Concurrent
 
             NotifyCollectionChangedEventArgs? eventArgs = null;
 
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
-
                 var sourceNode = FindNode_Locked(source);
                 if (sourceNode == null) return false;
 
@@ -547,10 +493,6 @@ namespace System.Collections.Concurrent
                         oldIndex);
                 }
             }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
-            }
 
             if (eventArgs != null)
             {
@@ -568,11 +510,8 @@ namespace System.Collections.Concurrent
         public bool TryPeek(out T item)
 #endif
         {
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
-
                 if (_head != null)
                 {
                     item = _head.Value;
@@ -581,10 +520,6 @@ namespace System.Collections.Concurrent
 
                 item = default!;
                 return false;
-            }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
             }
         }
 
@@ -596,15 +531,9 @@ namespace System.Collections.Concurrent
         {
             if (item == null) return false;
 
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
                 return FindNode_Locked(item) != null;
-            }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
             }
         }
 
@@ -615,11 +544,8 @@ namespace System.Collections.Concurrent
         {
             NotifyCollectionChangedEventArgs? eventArgs = null;
 
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
-
                 if (_count == 0)
                     return;
 
@@ -649,10 +575,6 @@ namespace System.Collections.Concurrent
                     eventArgs = new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset);
                 }
             }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
-            }
 
             if (eventArgs != null)
             {
@@ -670,11 +592,8 @@ namespace System.Collections.Concurrent
         /// </summary>
         public T[] ToArray()
         {
-            bool lockTaken = false;
-            try
+            lock (_syncRoot)
             {
-                _spinLock.Enter(ref lockTaken);
-
                 if (_count == 0) return Array.Empty<T>();
 
                 var array = new T[_count];
@@ -686,10 +605,6 @@ namespace System.Collections.Concurrent
                     cur = cur.Next;
                 }
                 return array;
-            }
-            finally
-            {
-                if (lockTaken) _spinLock.Exit(false);
             }
         }
 
