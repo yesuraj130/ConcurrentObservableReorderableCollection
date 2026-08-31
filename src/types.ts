@@ -23,17 +23,16 @@ export interface QueueItem {
 
 export interface BenchmarkResultItem {
   method: string;
-  targetFramework: 'net6.0' | 'net48';
-  itemCount: number;
+  category: 'Add_Enqueue' | 'ConcurrentStress' | 'Reorder_Move' | 'TryTake_Dequeue';
+  n: number;
   mean: string;
-  meanNs: number;
   error: string;
   stdDev: string;
+  median: string;
   ratio: string;
-  gen0: string;
-  gen1: string;
+  ratioSD: string;
   allocated: string;
-  allocatedBytes: number;
+  allocRatio: string;
 }
 
 export interface CSharpFileItem {

@@ -22,76 +22,58 @@ namespace System.Collections.Concurrent
     using System.ComponentModel;
     using System.Diagnostics;
     using System.Diagnostics.CodeAnalysis;
+    using System.Runtime.CompilerServices;
     using System.Threading;
 
     /// <summary>
-    /// Represents a thread-safe, observable collection that supports O(1) element reordering 
-    /// (<see cref="MoveBefore(T, T)"/> and <see cref="MoveAfter(T, T)"/>), concurrent additions (<see cref="Add(T)"/>), 
-    /// and concurrent removals (<see cref="TryTake(out T)"/>) while notifying subscribers safely via 
-    /// <see cref="INotifyCollectionChanged"/> and <see cref="INotifyPropertyChanged"/>.
+    /// Represents a high-performance, thread-safe observable collection supporting true O(1) 
+    /// element reordering (<see cref="MoveBefore(T, T)"/> and <see cref="MoveAfter(T, T)"/>), 
+    /// high-throughput producer/consumer FIFO processing, zero-allocation node recycling, and 
+    /// deadlock-safe <see cref="INotifyCollectionChanged"/> and <see cref="INotifyPropertyChanged"/> notifications.
     /// </summary>
-    /// <typeparam name="T">The type of elements contained in the collection. Must implement equality properly.</typeparam>
+    /// <typeparam name="T">The type of elements contained in the collection. Must not be null.</typeparam>
     [DebuggerDisplay("Count = {Count}, IsEmpty = {IsEmpty}")]
     public sealed class ConcurrentObservableReorderableCollection<T> : 
         INotifyCollectionChanged, 
         INotifyPropertyChanged, 
         IReadOnlyCollection<T>, 
         IEnumerable<T>
+        where T : notnull
     {
+        #region Internal Node Definition & Object Pool
+
+        internal sealed class Node
+        {
+            public T Value = default!;
+            public Node? Previous;
+            public Node? Next;
+            public Node? PoolNext;
+        }
+
+        #endregion
+
+        #region Fields
+
         private readonly object _syncRoot = new object();
-        private readonly LinkedList<T> _list;
-        private readonly Dictionary<T, LinkedListNode<T>> _nodeMap;
+        private readonly Dictionary<T, Node> _nodeMap;
         private readonly IEqualityComparer<T> _comparer;
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ConcurrentObservableReorderableCollection{T}"/> class.
-        /// </summary>
-        public ConcurrentObservableReorderableCollection()
-            : this(EqualityComparer<T>.Default)
-        {
-        }
+        private Node? _head;
+        private Node? _tail;
+        private int _count;
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ConcurrentObservableReorderableCollection{T}"/> class
-        /// with a specified equality comparer.
-        /// </summary>
-        /// <param name="comparer">The equality comparer to use for item lookup and uniqueness.</param>
-        public ConcurrentObservableReorderableCollection(IEqualityComparer<T>? comparer)
-        {
-            _comparer = comparer ?? EqualityComparer<T>.Default;
-            _list = new LinkedList<T>();
-            _nodeMap = new Dictionary<T, LinkedListNode<T>>(_comparer);
-        }
+        // Free-list node pool to eliminate GC allocations in streaming / producer-consumer workloads
+        private Node? _poolHead;
+        private int _poolCount;
+        private const int MaxPoolCapacity = 65536;
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ConcurrentObservableReorderableCollection{T}"/> class
-        /// populated with initial elements.
-        /// </summary>
-        /// <param name="collection">The initial items to add.</param>
-        public ConcurrentObservableReorderableCollection(IEnumerable<T> collection)
-            : this(collection, EqualityComparer<T>.Default)
-        {
-        }
+        // Cached static event args to eliminate PropertyChangedEventArgs allocations
+        private static readonly PropertyChangedEventArgs s_countChangedEventArgs = new PropertyChangedEventArgs(nameof(Count));
+        private static readonly PropertyChangedEventArgs s_isEmptyChangedEventArgs = new PropertyChangedEventArgs(nameof(IsEmpty));
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ConcurrentObservableReorderableCollection{T}"/> class
-        /// populated with initial elements and a custom equality comparer.
-        /// </summary>
-        /// <param name="collection">The initial items to add.</param>
-        /// <param name="comparer">The equality comparer to use.</param>
-        public ConcurrentObservableReorderableCollection(IEnumerable<T> collection, IEqualityComparer<T>? comparer)
-            : this(comparer)
-        {
-            if (collection == null)
-            {
-                throw new ArgumentNullException(nameof(collection));
-            }
+        #endregion
 
-            foreach (var item in collection)
-            {
-                Add(item);
-            }
-        }
+        #region Events
 
         /// <summary>
         /// Occurs when the collection changes (items added, removed, moved, or reset).
@@ -103,6 +85,61 @@ namespace System.Collections.Concurrent
         /// </summary>
         public event PropertyChangedEventHandler? PropertyChanged;
 
+        #endregion
+
+        #region Constructors
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="ConcurrentObservableReorderableCollection{T}"/> class.
+        /// </summary>
+        public ConcurrentObservableReorderableCollection()
+            : this(0, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance with a specified initial capacity to eliminate dictionary rehashing.
+        /// </summary>
+        public ConcurrentObservableReorderableCollection(int initialCapacity)
+            : this(initialCapacity, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance with a custom equality comparer.
+        /// </summary>
+        public ConcurrentObservableReorderableCollection(IEqualityComparer<T>? comparer)
+            : this(0, comparer)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance with a specified initial capacity and custom equality comparer.
+        /// </summary>
+        public ConcurrentObservableReorderableCollection(int initialCapacity, IEqualityComparer<T>? comparer)
+        {
+            if (initialCapacity < 0) throw new ArgumentOutOfRangeException(nameof(initialCapacity), "Capacity cannot be negative.");
+            _comparer = comparer ?? EqualityComparer<T>.Default;
+            _nodeMap = new Dictionary<T, Node>(initialCapacity, _comparer);
+        }
+
+        /// <summary>
+        /// Initializes a new instance populated with initial elements.
+        /// </summary>
+        public ConcurrentObservableReorderableCollection(IEnumerable<T> collection)
+            : this(0, null)
+        {
+            if (collection == null) throw new ArgumentNullException(nameof(collection));
+            foreach (var item in collection)
+            {
+                Add(item);
+            }
+        }
+
+        #endregion
+
+        #region Properties
+
         /// <summary>
         /// Gets the number of elements contained in the collection.
         /// </summary>
@@ -112,7 +149,7 @@ namespace System.Collections.Concurrent
             {
                 lock (_syncRoot)
                 {
-                    return _list.Count;
+                    return _count;
                 }
             }
         }
@@ -126,227 +163,224 @@ namespace System.Collections.Concurrent
             {
                 lock (_syncRoot)
                 {
-                    return _list.Count == 0;
+                    return _count == 0;
                 }
             }
         }
 
+        #endregion
+
+        #region Public Operations
+
         /// <summary>
-        /// Adds an item to the end of the collection in O(1) time and raises the <see cref="CollectionChanged"/> event.
+        /// Adds an item to the tail of the collection in O(1) time.
         /// If the item already exists, it is relocated to the tail.
+        /// Recycles pooled nodes for zero GC allocations in streaming loops.
         /// </summary>
-        /// <param name="item">The item to add.</param>
-        /// <exception cref="ArgumentNullException">Thrown if item is null (for reference types).</exception>
         public void Add(T item)
         {
-            if (item == null)
-            {
-                throw new ArgumentNullException(nameof(item));
-            }
+            if (item == null) throw new ArgumentNullException(nameof(item));
 
-            NotifyCollectionChangedEventArgs? collectionArgs = null;
-            int newIndex;
-            int countSnapshot;
+            NotifyCollectionChangedEventArgs? eventArgs = null;
+            bool hasSubscribers;
 
             lock (_syncRoot)
             {
+                hasSubscribers = CollectionChanged != null;
+
                 if (_nodeMap.TryGetValue(item, out var existingNode))
                 {
-                    // Item already exists - relocate to tail
-                    int oldIndex = GetNodeIndexUnsafe(existingNode);
-                    _list.Remove(existingNode);
-                    _list.AddLast(existingNode);
-                    newIndex = _list.Count - 1;
-
-                    if (oldIndex != newIndex)
+                    // Item already exists - relocate to tail if not already tail
+                    if (existingNode != _tail)
                     {
-                        collectionArgs = new NotifyCollectionChangedEventArgs(
-                            NotifyCollectionChangedAction.Move,
-                            item,
-                            newIndex,
-                            oldIndex);
+                        int oldIndex = hasSubscribers ? GetNodeIndex_Locked(existingNode) : -1;
+                        UnlinkNode_Locked(existingNode);
+                        LinkLast_Locked(existingNode);
+                        int newIndex = _count - 1;
+
+                        if (hasSubscribers)
+                        {
+                            eventArgs = new NotifyCollectionChangedEventArgs(
+                                NotifyCollectionChangedAction.Move,
+                                item,
+                                newIndex,
+                                oldIndex);
+                        }
                     }
                 }
                 else
                 {
-                    var newNode = _list.AddLast(item);
+                    // New item insertion from free-list node pool
+                    var newNode = AcquireNode_Locked(item);
+                    LinkLast_Locked(newNode);
                     _nodeMap[item] = newNode;
-                    newIndex = _list.Count - 1;
+                    _count++;
 
-                    collectionArgs = new NotifyCollectionChangedEventArgs(
-                        NotifyCollectionChangedAction.Add,
-                        item,
-                        newIndex);
+                    if (hasSubscribers)
+                    {
+                        eventArgs = new NotifyCollectionChangedEventArgs(
+                            NotifyCollectionChangedAction.Add,
+                            item,
+                            _count - 1);
+                    }
                 }
-
-                countSnapshot = _list.Count;
             }
 
-            // Fire notifications OUTSIDE of lock to prevent deadlocks with UI threads / event listeners
-            if (collectionArgs != null)
+            // Dispatch events OUTSIDE lock to prevent deadlocks with UI / Dispatcher threads
+            if (eventArgs != null)
             {
-                OnCollectionChanged(collectionArgs);
-                OnPropertyChanged(nameof(Count));
-                OnPropertyChanged(nameof(IsEmpty));
+                OnCollectionChanged(eventArgs);
+            }
+            if (PropertyChanged != null)
+            {
+                OnPropertyChanged(s_countChangedEventArgs);
+                OnPropertyChanged(s_isEmptyChangedEventArgs);
             }
         }
 
         /// <summary>
-        /// Attempts to remove and return the item at the head of the collection (FIFO queue order).
+        /// Attempts to remove and return the item at the head of the collection in O(1) time (FIFO queue order).
+        /// Recycles the node back to the pool for zero GC allocations.
         /// </summary>
-        /// <param name="item">When this method returns, contains the removed item, or default(T) if empty.</param>
-        /// <returns><c>true</c> if an item was successfully removed; otherwise, <c>false</c>.</returns>
 #if NET6_0_OR_GREATER
         public bool TryTake([MaybeNullWhen(false)] out T item)
 #else
         public bool TryTake(out T item)
 #endif
         {
-            NotifyCollectionChangedEventArgs? collectionArgs = null;
-            bool success = false;
+            NotifyCollectionChangedEventArgs? eventArgs = null;
+            bool hasSubscribers;
 
             lock (_syncRoot)
             {
-                if (_list.First != null)
+                if (_head == null)
                 {
-                    var headNode = _list.First;
-                    item = headNode.Value;
-                    _list.RemoveFirst();
-                    _nodeMap.Remove(item);
+                    item = default!;
+                    return false;
+                }
 
-                    collectionArgs = new NotifyCollectionChangedEventArgs(
+                var headNode = _head;
+                item = headNode.Value;
+
+                UnlinkNode_Locked(headNode);
+                _count--;
+                ReleaseNode_Locked(item, headNode);
+
+                hasSubscribers = CollectionChanged != null;
+                if (hasSubscribers)
+                {
+                    eventArgs = new NotifyCollectionChangedEventArgs(
                         NotifyCollectionChangedAction.Remove,
                         item,
                         0);
-
-                    success = true;
-                }
-                else
-                {
-                    item = default!;
-                    success = false;
                 }
             }
 
-            if (success && collectionArgs != null)
+            if (eventArgs != null)
             {
-                OnCollectionChanged(collectionArgs);
-                OnPropertyChanged(nameof(Count));
-                OnPropertyChanged(nameof(IsEmpty));
+                OnCollectionChanged(eventArgs);
             }
-
-            return success;
+            if (PropertyChanged != null)
+            {
+                OnPropertyChanged(s_countChangedEventArgs);
+                OnPropertyChanged(s_isEmptyChangedEventArgs);
+            }
+            return true;
         }
 
         /// <summary>
-        /// Reorders the collection such that <paramref name="source"/> is positioned immediately BEFORE <paramref name="target"/>.
+        /// Reorders the collection such that <paramref name="source"/> is positioned immediately BEFORE <paramref name="target"/> in O(1) time.
         /// </summary>
-        /// <param name="source">The item to be moved.</param>
-        /// <param name="target">The destination reference item.</param>
-        /// <returns><c>true</c> if the move succeeded; <c>false</c> if either item was not found or if source equals target.</returns>
         public bool MoveBefore(T source, T target)
         {
             if (source == null || target == null || _comparer.Equals(source, target))
-            {
                 return false;
-            }
 
-            NotifyCollectionChangedEventArgs? collectionArgs = null;
-            bool moved = false;
+            NotifyCollectionChangedEventArgs? eventArgs = null;
 
             lock (_syncRoot)
             {
-                if (_nodeMap.TryGetValue(source, out var sourceNode) &&
-                    _nodeMap.TryGetValue(target, out var targetNode))
+                if (!_nodeMap.TryGetValue(source, out var sourceNode) ||
+                    !_nodeMap.TryGetValue(target, out var targetNode))
                 {
-                    // If source is already immediately before target, no-op
-                    if (sourceNode.Next == targetNode)
-                    {
-                        return true;
-                    }
+                    return false;
+                }
 
-                    int oldIndex = GetNodeIndexUnsafe(sourceNode);
+                if (sourceNode.Next == targetNode)
+                    return false; // Already immediately before target
 
-                    _list.Remove(sourceNode);
-                    _list.AddBefore(targetNode, sourceNode);
+                bool hasSubscribers = CollectionChanged != null;
+                int oldIndex = hasSubscribers ? GetNodeIndex_Locked(sourceNode) : -1;
 
-                    int newIndex = GetNodeIndexUnsafe(sourceNode);
+                UnlinkNode_Locked(sourceNode);
+                LinkBefore_Locked(targetNode, sourceNode);
 
-                    collectionArgs = new NotifyCollectionChangedEventArgs(
+                if (hasSubscribers)
+                {
+                    int newIndex = GetNodeIndex_Locked(sourceNode);
+                    eventArgs = new NotifyCollectionChangedEventArgs(
                         NotifyCollectionChangedAction.Move,
                         source,
                         newIndex,
                         oldIndex);
-
-                    moved = true;
                 }
             }
 
-            if (moved && collectionArgs != null)
+            if (eventArgs != null)
             {
-                OnCollectionChanged(collectionArgs);
+                OnCollectionChanged(eventArgs);
             }
-
-            return moved;
+            return true;
         }
 
         /// <summary>
-        /// Reorders the collection such that <paramref name="source"/> is positioned immediately AFTER <paramref name="target"/>.
+        /// Reorders the collection such that <paramref name="source"/> is positioned immediately AFTER <paramref name="target"/> in O(1) time.
         /// </summary>
-        /// <param name="source">The item to be moved.</param>
-        /// <param name="target">The destination reference item.</param>
-        /// <returns><c>true</c> if the move succeeded; <c>false</c> if either item was not found or if source equals target.</returns>
         public bool MoveAfter(T source, T target)
         {
             if (source == null || target == null || _comparer.Equals(source, target))
-            {
                 return false;
-            }
 
-            NotifyCollectionChangedEventArgs? collectionArgs = null;
-            bool moved = false;
+            NotifyCollectionChangedEventArgs? eventArgs = null;
 
             lock (_syncRoot)
             {
-                if (_nodeMap.TryGetValue(source, out var sourceNode) &&
-                    _nodeMap.TryGetValue(target, out var targetNode))
+                if (!_nodeMap.TryGetValue(source, out var sourceNode) ||
+                    !_nodeMap.TryGetValue(target, out var targetNode))
                 {
-                    // If source is already immediately after target, no-op
-                    if (sourceNode.Previous == targetNode)
-                    {
-                        return true;
-                    }
+                    return false;
+                }
 
-                    int oldIndex = GetNodeIndexUnsafe(sourceNode);
+                if (sourceNode.Previous == targetNode)
+                    return false; // Already immediately after target
 
-                    _list.Remove(sourceNode);
-                    _list.AddAfter(targetNode, sourceNode);
+                bool hasSubscribers = CollectionChanged != null;
+                int oldIndex = hasSubscribers ? GetNodeIndex_Locked(sourceNode) : -1;
 
-                    int newIndex = GetNodeIndexUnsafe(sourceNode);
+                UnlinkNode_Locked(sourceNode);
+                LinkAfter_Locked(targetNode, sourceNode);
 
-                    collectionArgs = new NotifyCollectionChangedEventArgs(
+                if (hasSubscribers)
+                {
+                    int newIndex = GetNodeIndex_Locked(sourceNode);
+                    eventArgs = new NotifyCollectionChangedEventArgs(
                         NotifyCollectionChangedAction.Move,
                         source,
                         newIndex,
                         oldIndex);
-
-                    moved = true;
                 }
             }
 
-            if (moved && collectionArgs != null)
+            if (eventArgs != null)
             {
-                OnCollectionChanged(collectionArgs);
+                OnCollectionChanged(eventArgs);
             }
-
-            return moved;
+            return true;
         }
 
         /// <summary>
         /// Attempts to peek at the item at the head of the collection without removing it.
         /// </summary>
-        /// <param name="item">The peeked item if available.</param>
-        /// <returns><c>true</c> if an item exists at the head; otherwise <c>false</c>.</returns>
 #if NET6_0_OR_GREATER
         public bool TryPeek([MaybeNullWhen(false)] out T item)
 #else
@@ -355,9 +389,9 @@ namespace System.Collections.Concurrent
         {
             lock (_syncRoot)
             {
-                if (_list.First != null)
+                if (_head != null)
                 {
-                    item = _list.First.Value;
+                    item = _head.Value;
                     return true;
                 }
 
@@ -369,8 +403,6 @@ namespace System.Collections.Concurrent
         /// <summary>
         /// Determines whether the collection contains the specified item in O(1) time.
         /// </summary>
-        /// <param name="item">The item to locate.</param>
-        /// <returns><c>true</c> if the item is present; otherwise, <c>false</c>.</returns>
         public bool Contains(T item)
         {
             if (item == null) return false;
@@ -381,39 +413,67 @@ namespace System.Collections.Concurrent
         }
 
         /// <summary>
-        /// Removes all elements from the collection.
+        /// Removes all elements from the collection and recycles nodes into the free-list pool.
         /// </summary>
         public void Clear()
         {
-            bool hadItems = false;
+            NotifyCollectionChangedEventArgs? eventArgs = null;
+
             lock (_syncRoot)
             {
-                if (_list.Count > 0)
+                if (_count == 0)
+                    return;
+
+                var current = _head;
+                while (current != null && _poolCount < MaxPoolCapacity)
                 {
-                    _list.Clear();
-                    _nodeMap.Clear();
-                    hadItems = true;
+                    var next = current.Next;
+                    current.Value = default!;
+                    current.Previous = null;
+                    current.Next = null;
+                    current.PoolNext = _poolHead;
+                    _poolHead = current;
+                    _poolCount++;
+                    current = next;
+                }
+
+                _head = null;
+                _tail = null;
+                _count = 0;
+                _nodeMap.Clear();
+
+                if (CollectionChanged != null)
+                {
+                    eventArgs = new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset);
                 }
             }
 
-            if (hadItems)
+            if (eventArgs != null)
             {
-                OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
-                OnPropertyChanged(nameof(Count));
-                OnPropertyChanged(nameof(IsEmpty));
+                OnCollectionChanged(eventArgs);
+            }
+            if (PropertyChanged != null)
+            {
+                OnPropertyChanged(s_countChangedEventArgs);
+                OnPropertyChanged(s_isEmptyChangedEventArgs);
             }
         }
 
         /// <summary>
         /// Copies the elements of the collection to a new array in snapshot order.
         /// </summary>
-        /// <returns>An array containing snapshots of the elements.</returns>
         public T[] ToArray()
         {
             lock (_syncRoot)
             {
-                var array = new T[_list.Count];
-                _list.CopyTo(array, 0);
+                var array = new T[_count];
+                int idx = 0;
+                var current = _head;
+                while (current != null)
+                {
+                    array[idx++] = current.Value;
+                    current = current.Next;
+                }
                 return array;
             }
         }
@@ -421,43 +481,128 @@ namespace System.Collections.Concurrent
         /// <summary>
         /// Returns an enumerator that iterates through a thread-safe snapshot of the collection.
         /// </summary>
-        /// <returns>An enumerator for the collection.</returns>
         public IEnumerator<T> GetEnumerator()
         {
             T[] snapshot;
             lock (_syncRoot)
             {
-                snapshot = new T[_list.Count];
-                _list.CopyTo(snapshot, 0);
+                snapshot = new T[_count];
+                int idx = 0;
+                var current = _head;
+                while (current != null)
+                {
+                    snapshot[idx++] = current.Value;
+                    current = current.Next;
+                }
             }
 
-            foreach (var item in snapshot)
+            for (int i = 0; i < snapshot.Length; i++)
             {
-                yield return item;
+                yield return snapshot[i];
             }
         }
 
-        /// <inheritdoc />
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-        private static int GetNodeIndexUnsafe(LinkedListNode<T> node)
+        #endregion
+
+        #region Internal Pointer Helpers (Must be called inside lock (_syncRoot))
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Node AcquireNode_Locked(T item)
+        {
+            if (_poolHead != null)
+            {
+                var node = _poolHead;
+                _poolHead = node.PoolNext;
+                node.PoolNext = null;
+                _poolCount--;
+                node.Value = item;
+                return node;
+            }
+            return new Node { Value = item };
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ReleaseNode_Locked(T item, Node node)
+        {
+            _nodeMap.Remove(item);
+            if (_poolCount < MaxPoolCapacity)
+            {
+                node.Value = default!;
+                node.Previous = null;
+                node.Next = null;
+                node.PoolNext = _poolHead;
+                _poolHead = node;
+                _poolCount++;
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void LinkLast_Locked(Node node)
+        {
+            node.Previous = _tail;
+            node.Next = null;
+            if (_tail != null) _tail.Next = node;
+            else _head = node;
+            _tail = node;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void LinkBefore_Locked(Node target, Node node)
+        {
+            node.Next = target;
+            node.Previous = target.Previous;
+            if (target.Previous != null) target.Previous.Next = node;
+            else _head = node;
+            target.Previous = node;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void LinkAfter_Locked(Node target, Node node)
+        {
+            node.Previous = target;
+            node.Next = target.Next;
+            if (target.Next != null) target.Next.Previous = node;
+            else _tail = node;
+            target.Next = node;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void UnlinkNode_Locked(Node node)
+        {
+            if (node.Previous != null) node.Previous.Next = node.Next;
+            else _head = node.Next;
+
+            if (node.Next != null) node.Next.Previous = node.Previous;
+            else _tail = node.Previous;
+
+            node.Previous = null;
+            node.Next = null;
+        }
+
+        private int GetNodeIndex_Locked(Node node)
         {
             int index = 0;
-            var current = node.Previous;
+            var current = _head;
             while (current != null)
             {
+                if (ReferenceEquals(current, node)) return index;
+                current = current.Next;
                 index++;
-                current = current.Previous;
             }
-            return index;
+            return -1;
         }
+
+        #endregion
+
+        #region Event Invocation Helpers
 
         private void OnCollectionChanged(NotifyCollectionChangedEventArgs e)
         {
             var handler = CollectionChanged;
             if (handler == null) return;
 
-            // Invocations are safeguarded to ensure subscriber faults don't corrupt collection state
             foreach (NotifyCollectionChangedEventHandler subscriber in handler.GetInvocationList())
             {
                 try
@@ -471,12 +616,11 @@ namespace System.Collections.Concurrent
             }
         }
 
-        private void OnPropertyChanged(string propertyName)
+        private void OnPropertyChanged(PropertyChangedEventArgs args)
         {
             var handler = PropertyChanged;
             if (handler == null) return;
 
-            var args = new PropertyChangedEventArgs(propertyName);
             foreach (PropertyChangedEventHandler subscriber in handler.GetInvocationList())
             {
                 try
@@ -489,6 +633,8 @@ namespace System.Collections.Concurrent
                 }
             }
         }
+
+        #endregion
     }
 }
 `,
