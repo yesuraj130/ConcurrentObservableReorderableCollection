@@ -864,7 +864,7 @@ jobs:
 
             Assert.True(success);
             Assert.Equal("First", item);
-            Assert.Equal(1, coll.Count);
+            Assert.Single(coll);
             Assert.Single(events);
             Assert.Equal(NotifyCollectionChangedAction.Remove, events[0].Action);
             Assert.Equal("First", events[0].OldItems![0]);

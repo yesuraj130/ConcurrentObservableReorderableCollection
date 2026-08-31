@@ -18,7 +18,7 @@ namespace ConcurrentCollections.Tests
 
             collection.Add("Task 1");
 
-            Assert.Equal(1, collection.Count);
+            Assert.Single(collection);
             Assert.False(collection.IsEmpty);
             Assert.Single(events);
             Assert.Equal(NotifyCollectionChangedAction.Add, events[0].Action);
@@ -66,7 +66,7 @@ namespace ConcurrentCollections.Tests
 
             Assert.True(taken);
             Assert.Equal(10, val);
-            Assert.Equal(1, collection.Count);
+            Assert.Single(collection);
         }
 
         [Fact]
